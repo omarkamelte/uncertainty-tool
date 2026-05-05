@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Uncertainty Budget Calculator</title>
+
+  <!--
+    Source of calculation logic: the Python/Colab code provided in the chat.
+
+    This file keeps the same computational order:
+    1) Upload Excel
+    2) Enter coverage factor k
+    3) Read and clean data
+    4) Convert to standard uncertainty
+    5) Apply sensitivity
+    6) Variance + combined uncertainty
+    7) Contribution %
+    8) Monte Carlo simulation
+    9) Display results
+    10) Charts
+    11) PDF report
+    12) Excel output
+
+    Math note:
+    JavaScript Number is IEEE-754 double precision, comparable to numpy.float64
+    for these arithmetic operations. Monte Carlo numerical values will not be
+    identical to NumPy because the random-number generator is different, but the
+    implemented distributions and formulas match the Python logic.
+  -->
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+
+  <style>
+    :root {
+      --card: #ffffff;
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --text: #172033;
+      --muted: #667085;
+      --border: #e5e7eb;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --dark: #111827;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.15), transparent 34%),
+        linear-gradient(135deg, #eef4ff, #f8fafc 55%, #edf7ff);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 18px 60px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #2563eb, #111827);
+      color: white;
+      padding: 34px;
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      margin-bottom: 22px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 220px;
+      height: 220px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.08);
+      left: -70px;
+      top: -80px;
+    }
+
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: 34px;
+      line-height: 1.25;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero p {
+      margin: 0;
+      color: #dbeafe;
+      font-size: 16px;
+      max-width: 860px;
+      line-height: 1.8;
+      position: relative;
+      z-index: 1;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(229, 231, 235, 0.95);
+      border-radius: 24px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h2 {
+      margin: 0 0 16px;
+      font-size: 20px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.75;
+      margin-top: 10px;
+    }
+
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    input[type="file"],
+    input[type="number"] {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 15px;
+      padding: 12px;
+      font-size: 15px;
+      background: #f9fafb;
+      outline: none;
+      color: var(--text);
+    }
+
+    input[type="number"]:focus {
+      border-color: var(--primary);
+      background: white;
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.09);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    button {
+      border: none;
+      border-radius: 14px;
+      padding: 12px 18px;
+      font-weight: 800;
+      cursor: pointer;
+      background: var(--primary);
+      color: white;
+      transition: 0.2s ease;
+      font-size: 14px;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+
+    button.secondary { background: var(--dark); }
+    button.success { background: var(--success); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .results {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .metric {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 18px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+
+    .metric .value {
+      font-size: 24px;
+      font-weight: 900;
+      direction: ltr;
+      text-align: right;
+    }
+
+    .section { margin-top: 22px; }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .chart-card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .chart-card h3 {
+      margin: 0 0 12px;
+      font-size: 17px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 980px;
+      direction: ltr;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+      text-align: center;
+      font-size: 14px;
+    }
+
+    th {
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-weight: 900;
+      position: sticky;
+      top: 0;
+    }
+
+    tr:hover td { background: #f9fafb; }
+
+    .error {
+      color: var(--danger);
+      font-weight: 800;
+      margin-top: 12px;
+      line-height: 1.7;
+    }
+
+    .file-name {
+      margin-top: 10px;
+      color: var(--success);
+      font-weight: 800;
+    }
+
+    canvas { max-height: 360px; }
+
+    .footer-note {
+      text-align: center;
+      color: var(--muted);
+      margin-top: 22px;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    code.inline {
+      background: #eef2ff;
+      color: #1e3a8a;
+      padding: 2px 6px;
+      border-radius: 8px;
+      direction: ltr;
+      display: inline-block;
+    }
+
+    @media (max-width: 920px) {
+      .grid,
+      .results,
+      .charts-grid { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 26px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="hero">
+      <h1>حاسبة ميزانية عدم اليقين</h1>
+      <p>
+        نسخة HTML واحدة تعمل داخل المتصفح: ترفع ملف Excel، تدخل قيمة k، وتحصل على نفس خطوات كود Python:
+        standard uncertainty، sensitivity، variance، combined uncertainty، expanded uncertainty، Monte Carlo، charts، PDF، وExcel.
+      </p>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <h2>1) رفع ملف Excel</h2>
+        <label for="excelFile">اختر ملف Excel</label>
+        <input id="excelFile" type="file" accept=".xlsx,.xls" />
+        <div id="fileName" class="file-name"></div>
+        <p class="hint">
+          نفس كود Python يفترض أن الشيت به 4 أعمدة:
+          <br />
+          <code class="inline">Index</code>, <code class="inline">u</code>, <code class="inline">Distribution</code>, <code class="inline">Sensitivity</code>
+          <br />
+          التوزيع يكتب مثل: normal / rectangular / triangular.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>2) إعدادات الحساب</h2>
+        <label for="kValue">Coverage Factor k</label>
+        <input id="kValue" type="number" value="2" step="0.1" />
+        <p class="hint">
+          الكود يحسب <code class="inline">U = k × uc</code>. قيمة k=2 شائعة للتغطية التقريبية 95% عندما تكون الافتراضات مناسبة.
+          Monte Carlo يستخدم N=100000 مثل كود Python.
+        </p>
+        <div class="actions">
+          <button id="calculateBtn">احسب النتائج</button>
+          <button id="downloadExcelBtn" class="success" disabled>تحميل Excel</button>
+          <button id="downloadPdfBtn" class="secondary" disabled>تحميل PDF</button>
+        </div>
+        <div id="errorBox" class="error"></div>
+      </section>
+    </div>
+
+    <section id="resultsSection" class="card section" style="display:none;">
+      <h2>النتائج النهائية</h2>
+      <div class="results">
+        <div class="metric">
+          <div class="label">Combined Standard Uncertainty (uc)</div>
+          <div id="ucValue" class="value">-</div>
+        </div>
+        <div class="metric">
+          <div class="label">Expanded Uncertainty (U)</div>
+          <div id="expandedValue" class="value">-</div>
+        </div>
+        <div class="metric">
+          <div class="label">Monte Carlo Std</div>
+          <div id="mcStdValue" class="value">-</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="chartSection" class="section" style="display:none;">
+      <div class="charts-grid">
+        <div class="chart-card">
+          <h3>Monte Carlo Distribution</h3>
+          <canvas id="histChart"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>Contribution (%)</h3>
+          <canvas id="contributionChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section id="tableSection" class="section" style="display:none;">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Index</th>
+              <th>u</th>
+              <th>Distribution</th>
+              <th>Sensitivity</th>
+              <th>u_standard</th>
+              <th>u_adjusted</th>
+              <th>variance</th>
+              <th>contribution_%</th>
+            </tr>
+          </thead>
+          <tbody id="resultTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="footer-note">
+      كل الحسابات تتم داخل المتصفح فقط. الملف لا يتم رفعه إلى أي سيرفر.
+      <br />
+      JavaScript Number يستخدم double precision 64-bit مثل numpy.float64 في الحسابات الأساسية. نتائج Monte Carlo لن تكون نفس أرقام NumPy حرفيًا لأن مولد الأرقام العشوائية مختلف، لكنها إحصائيًا نفس الطريقة.
+    </div>
+  </div>
+
+  <script>
+    // ==========================================
+    // PROFESSIONAL UNCERTAINTY TOOL - HTML VERSION
+    // Matching the provided Python calculation order
+    // ==========================================
+
+    const N = 100000;
+
+    const excelFileInput = document.getElementById("excelFile");
+    const fileNameBox = document.getElementById("fileName");
+    const kValueInput = document.getElementById("kValue");
+    const calculateBtn = document.getElementById("calculateBtn");
+    const downloadExcelBtn = document.getElementById("downloadExcelBtn");
+    const downloadPdfBtn = document.getElementById("downloadPdfBtn");
+    const errorBox = document.getElementById("errorBox");
+
+    const resultsSection = document.getElementById("resultsSection");
+    const chartSection = document.getElementById("chartSection");
+    const tableSection = document.getElementById("tableSection");
+
+    const ucValue = document.getElementById("ucValue");
+    const expandedValue = document.getElementById("expandedValue");
+    const mcStdValue = document.getElementById("mcStdValue");
+    const resultTableBody = document.getElementById("resultTableBody");
+
+    let df = [];
+    let finalResults = null;
+    let contributionChart = null;
+    let histChart = null;
+
+    function showError(message) {
+      errorBox.textContent = message;
+    }
+
+    function clearError() {
+      errorBox.textContent = "";
+    }
+
+    function toFixed6(value) {
+      return Number.isFinite(value) ? value.toFixed(6) : "";
+    }
+
+    // Equivalent to Python:
+    // def convert_to_standard(row):
+    //     if 'rect' in dist: return u / np.sqrt(3)
+    //     elif 'tri' in dist: return u / np.sqrt(6)
+    //     elif 'norm' in dist: return u
+    //     else: return u
+    function convertToStandard(row) {
+      const u = row.u;
+      const dist = row.Distribution;
+
+      if (dist.includes("rect")) return u / Math.sqrt(3);
+      if (dist.includes("tri")) return u / Math.sqrt(6);
+      if (dist.includes("norm")) return u;
+      return u;
+    }
+
+    // Box-Muller normal generator: mean=0, std=1
+    function standardNormal() {
+      let u1 = 0;
+      let u2 = 0;
+      while (u1 === 0) u1 = Math.random();
+      while (u2 === 0) u2 = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+    }
+
+    function sampleUniform(min, max) {
+      return min + (max - min) * Math.random();
+    }
+
+    // Equivalent to np.random.triangular(left, mode, right)
+    function sampleTriangular(left, mode, right) {
+      const u = Math.random();
+      const c = (mode - left) / (right - left);
+      if (u < c) {
+        return left + Math.sqrt(u * (right - left) * (mode - left));
+      }
+      return right - Math.sqrt((1 - u) * (right - left) * (right - mode));
+    }
+
+    // Equivalent to np.std(mc_results), ddof=0
+    function populationStd(values) {
+      const n = values.length;
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += values[i];
+      const mean = sum / n;
+
+      let varianceSum = 0;
+      for (let i = 0; i < n; i++) {
+        const diff = values[i] - mean;
+        varianceSum += diff * diff;
+      }
+      return Math.sqrt(varianceSum / n);
+    }
+
+    excelFileInput.addEventListener("change", function (event) {
+      clearError();
+      df = [];
+      finalResults = null;
+      resultsSection.style.display = "none";
+      chartSection.style.display = "none";
+      tableSection.style.display = "none";
+      downloadExcelBtn.disabled = true;
+      downloadPdfBtn.disabled = true;
+
+      const file = event.target.files[0];
+      if (!file) return;
+
+      fileNameBox.textContent = "تم اختيار الملف: " + file.name;
+
+      const reader = new FileReader();
+
+      reader.onload = function (e) {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+
+          // Like pd.read_excel(file_name), then df.columns = ['Index','u','Distribution','Sensitivity']
+          const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null });
+
+          if (rows.length < 2) {
+            showError("الملف لا يحتوي على بيانات كافية.");
+            return;
+          }
+
+          if (rows[0].length !== 4) {
+            showError("للمطابقة الصارمة مع كود Python، يجب أن يحتوي الشيت على 4 أعمدة فقط: Index, u, Distribution, Sensitivity.");
+            return;
+          }
+
+          const dataRows = rows.slice(1);
+
+          // Equivalent to:
+          // df.columns = ['Index', 'u', 'Distribution', 'Sensitivity']
+          // df = df.dropna(subset=['u', 'Sensitivity'])
+          // df['Distribution'] = df['Distribution'].astype(str).str.strip().str.lower()
+          df = dataRows
+            .map((r) => ({
+              Index: r[0],
+              u: r[1],
+              Distribution: r[2],
+              Sensitivity: r[3]
+            }))
+            .filter((row) => row.u !== null && row.u !== undefined && row.u !== "" &&
+                             row.Sensitivity !== null && row.Sensitivity !== undefined && row.Sensitivity !== "")
+            .map((row) => ({
+              Index: row.Index,
+              u: Number(row.u),
+              Distribution: String(row.Distribution).trim().toLowerCase(),
+              Sensitivity: Number(row.Sensitivity)
+            }));
+
+          if (df.length === 0) {
+            showError("بعد حذف الصفوف الناقصة في u أو Sensitivity، لم يتبقَ أي صف صالح.");
+            return;
+          }
+
+          const invalid = df.find((row) => !Number.isFinite(row.u) || !Number.isFinite(row.Sensitivity));
+          if (invalid) {
+            showError("يوجد صف يحتوي على u أو Sensitivity غير رقمية. راجع ملف Excel.");
+          }
+        } catch (error) {
+          showError("حدث خطأ أثناء قراءة ملف Excel: " + error.message);
+        }
+      };
+
+      reader.readAsArrayBuffer(file);
+    });
+
+    calculateBtn.addEventListener("click", function () {
+      clearError();
+
+      if (!df || df.length === 0) {
+        showError("من فضلك ارفع ملف Excel صحيح أولاً.");
+        return;
+      }
+
+      const k = Number(kValueInput.value);
+      if (!Number.isFinite(k)) {
+        showError("قيمة k يجب أن تكون رقمية.");
+        return;
+      }
+
+      // ==========================================
+      // Step 6: Convert to standard uncertainty
+      // ==========================================
+      const rowsWithStandard = df.map((row) => ({
+        ...row,
+        u_standard: convertToStandard(row)
+      }));
+
+      // ==========================================
+      // Step 7: Apply sensitivity
+      // ==========================================
+      const rowsWithAdjusted = rowsWithStandard.map((row) => ({
+        ...row,
+        u_adjusted: row.u_standard * row.Sensitivity
+      }));
+
+      // ==========================================
+      // Step 8: Variance & combined uncertainty
+      // ==========================================
+      const rowsWithVariance = rowsWithAdjusted.map((row) => ({
+        ...row,
+        variance: row.u_adjusted ** 2
+      }));
+
+      const varianceSum = rowsWithVariance.reduce((sum, row) => sum + row.variance, 0);
+      const uc = Math.sqrt(varianceSum);
+      const U = k * uc;
+
+      // ==========================================
+      // Step 9: Contribution %
+      // ==========================================
+      const rowsWithContribution = rowsWithVariance.map((row) => ({
+        ...row,
+        contribution_percent: varianceSum === 0 ? NaN : (row.variance / varianceSum) * 100
+      }));
+
+      // ==========================================
+      // Step 10: Monte Carlo Simulation
+      // ==========================================
+      const mcResults = new Float64Array(N);
+
+      for (const row of rowsWithContribution) {
+        const u = row.u_standard;
+        const c = row.Sensitivity;
+        const dist = row.Distribution;
+
+        if (dist.includes("rect")) {
+          const left = -Math.sqrt(3) * u;
+          const right = Math.sqrt(3) * u;
+          for (let i = 0; i < N; i++) {
+            mcResults[i] += c * sampleUniform(left, right);
+          }
+        } else if (dist.includes("tri")) {
+          const left = -Math.sqrt(6) * u;
+          const mode = 0;
+          const right = Math.sqrt(6) * u;
+          for (let i = 0; i < N; i++) {
+            mcResults[i] += c * sampleTriangular(left, mode, right);
+          }
+        } else {
+          for (let i = 0; i < N; i++) {
+            mcResults[i] += c * (standardNormal() * u);
+          }
+        }
+      }
+
+      const mcStd = populationStd(mcResults);
+
+      finalResults = {
+        rows: rowsWithContribution,
+        uc,
+        U,
+        mcStd,
+        varianceSum,
+        mcResults: Array.from(mcResults)
+      };
+
+      renderResults();
+      downloadExcelBtn.disabled = false;
+      downloadPdfBtn.disabled = false;
+    });
+
+    function renderResults() {
+      if (!finalResults) return;
+
+      ucValue.textContent = toFixed6(finalResults.uc);
+      expandedValue.textContent = toFixed6(finalResults.U);
+      mcStdValue.textContent = toFixed6(finalResults.mcStd);
+
+      resultTableBody.innerHTML = "";
+      for (const row of finalResults.rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.Index)}</td>
+          <td>${toFixed6(row.u)}</td>
+          <td>${escapeHtml(row.Distribution)}</td>
+          <td>${toFixed6(row.Sensitivity)}</td>
+          <td>${toFixed6(row.u_standard)}</td>
+          <td>${toFixed6(row.u_adjusted)}</td>
+          <td>${toFixed6(row.variance)}</td>
+          <td>${toFixed6(row.contribution_percent)}</td>
+        `;
+        resultTableBody.appendChild(tr);
+      }
+
+      renderCharts();
+
+      resultsSection.style.display = "block";
+      chartSection.style.display = "block";
+      tableSection.style.display = "block";
+    }
+
+    function renderCharts() {
+      if (contributionChart) contributionChart.destroy();
+      if (histChart) histChart.destroy();
+
+      // Python equivalent:
+      // df_sorted = df.sort_values(by='contribution_%', ascending=False)
+      const sortedRows = [...finalResults.rows].sort((a, b) => b.contribution_percent - a.contribution_percent);
+
+      const contributionCtx = document.getElementById("contributionChart");
+      contributionChart = new Chart(contributionCtx, {
+        type: "bar",
+        data: {
+          labels: sortedRows.map((r) => String(r.Index)),
+          datasets: [{
+            label: "Contribution %",
+            data: sortedRows.map((r) => r.contribution_percent)
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true } }
+        }
+      });
+
+      const bins = makeHistogramBins(finalResults.mcResults, 100);
+      const histCtx = document.getElementById("histChart");
+      histChart = new Chart(histCtx, {
+        type: "bar",
+        data: {
+          labels: bins.labels,
+          datasets: [{
+            label: "Frequency",
+            data: bins.counts
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { maxRotation: 60, minRotation: 60, autoSkip: true, maxTicksLimit: 12 } },
+            y: { beginAtZero: true }
+          }
+        }
+      });
+    }
+
+    function makeHistogramBins(values, binCount) {
+      let min = Infinity;
+      let max = -Infinity;
+      for (const v of values) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+
+      if (min === max) {
+        return { labels: [toFixed6(min)], counts: [values.length] };
+      }
+
+      const width = (max - min) / binCount;
+      const counts = new Array(binCount).fill(0);
+
+      for (const v of values) {
+        let idx = Math.floor((v - min) / width);
+        if (idx >= binCount) idx = binCount - 1;
+        counts[idx] += 1;
+      }
+
+      const labels = counts.map((_, i) => {
+        const start = min + i * width;
+        const end = start + width;
+        return `${start.toFixed(3)} to ${end.toFixed(3)}`;
+      });
+
+      return { labels, counts };
+    }
+
+    downloadExcelBtn.addEventListener("click", function () {
+      if (!finalResults) return;
+
+      // Equivalent to df.to_excel("uncertainty_budget.xlsx", index=False)
+      const excelRows = finalResults.rows.map((row) => ({
+        Index: row.Index,
+        u: row.u,
+        Distribution: row.Distribution,
+        Sensitivity: row.Sensitivity,
+        u_standard: row.u_standard,
+        u_adjusted: row.u_adjusted,
+        variance: row.variance,
+        "contribution_%": row.contribution_percent
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(excelRows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Uncertainty Budget");
+      XLSX.writeFile(workbook, "uncertainty_budget.xlsx");
+    });
+
+    downloadPdfBtn.addEventListener("click", function () {
+      if (!finalResults) return;
+
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape" });
+
+      doc.setFontSize(18);
+      doc.text("Uncertainty Budget Report", 14, 16);
+
+      doc.setFontSize(11);
+      doc.text(`Combined Standard Uncertainty: ${toFixed6(finalResults.uc)}`, 14, 26);
+      doc.text(`Expanded Uncertainty (k=${kValueInput.value}): ${toFixed6(finalResults.U)}`, 14, 33);
+      doc.text(`Monte Carlo Std: ${toFixed6(finalResults.mcStd)}`, 14, 40);
+
+      doc.autoTable({
+        startY: 48,
+        head: [["Index", "u", "Distribution", "Sensitivity", "u_standard", "u_adjusted", "variance", "contribution_%"]],
+        body: finalResults.rows.map((row) => [
+          String(row.Index),
+          toFixed6(row.u),
+          String(row.Distribution),
+          toFixed6(row.Sensitivity),
+          toFixed6(row.u_standard),
+          toFixed6(row.u_adjusted),
+          toFixed6(row.variance),
+          toFixed6(row.contribution_percent)
+        ]),
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [128, 128, 128] }
+      });
+
+      let y = doc.lastAutoTable.finalY + 10;
+      const pageHeight = doc.internal.pageSize.getHeight();
+
+      if (y + 75 > pageHeight) {
+        doc.addPage();
+        y = 16;
+      }
+
+      doc.setFontSize(13);
+      doc.text("Monte Carlo Distribution", 14, y);
+      const histImage = document.getElementById("histChart").toDataURL("image/png", 1.0);
+      doc.addImage(histImage, "PNG", 14, y + 6, 125, 70);
+
+      doc.text("Contribution Chart", 154, y);
+      const contributionImage = document.getElementById("contributionChart").toDataURL("image/png", 1.0);
+      doc.addImage(contributionImage, "PNG", 154, y + 6, 125, 70);
+
+      doc.save("uncertainty_report.pdf");
+    });
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+  </script>
+</body>
+</html>
